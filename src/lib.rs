@@ -1,7 +1,6 @@
 mod parse;
 
 use std::{
-    collections::BTreeSet,
     fmt::Display,
     str::FromStr,
 };
@@ -58,11 +57,11 @@ pub struct Closure {
 
 impl Display for Closure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "<closure {},{},", self.bv, self.body)?;
+        write!(f, "<closure {},{},[", self.bv, self.body)?;
         for e in &self.env {
             write!(f, " {}", e)?;
         }
-        write!(f, ">")
+        write!(f, "]>")
     }
 }
 
@@ -104,18 +103,26 @@ pub struct Dump {
     dump: Box<DumpValue>,
 }
 
+fn format_vec<T: std::fmt::Display>(vec: &[T]) -> String {
+    let contents = vec
+        .iter()
+        .map(|item| format!("{}", item))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{}]", contents)
+}
 impl Display for Dump {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "<s={:?}, e={:?}, c={:?}, d={}>",
-            self.stack, self.env, self.control, self.dump
+            "<s={}, e={}, c={}, d={}>",
+            format_vec(&self.stack), format_vec(&self.env), format_vec(&self.control), self.dump
         )
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum DumpValue {
+pub enum DumpValue {
     Dump(Dump),
     Null,
 }
@@ -135,7 +142,6 @@ pub struct SECDMachine {
     env: Vec<Env>,
     control: Vec<Cont>,
     dump: DumpValue,
-    constants: BTreeSet<String>,
 }
 
 impl Display for SECDMachine {
@@ -149,27 +155,39 @@ impl Display for SECDMachine {
 }
 
 impl SECDMachine {
-    pub fn new(exp: LambdaExpression, constants: BTreeSet<String>) -> SECDMachine {
+    pub fn new(exp: LambdaExpression) -> SECDMachine {
         SECDMachine {
             stack: Vec::new(),
             env: Vec::new(),
             control: vec![Cont::Exp(exp)],
             dump: DumpValue::Null,
-            constants,
         }
     }
 
-    pub fn lookup_env(&self, x: impl AsRef<str>) -> Option<LambdaExpression> {
-        if self.constants.contains(x.as_ref()) {
-            return Some(LambdaExpression::Var(x.as_ref().to_string()));
-        }
+    pub fn stack(&self) -> &Vec<StackValue> {
+        &self.stack
+    }
+
+    pub fn env(&self) -> &Vec<Env> {
+        &self.env
+    }
+
+    pub fn control(&self) -> &Vec<Cont> {
+        &self.control
+    }
+
+    pub fn dump(&self) -> &DumpValue {
+        &self.dump
+    }
+
+    pub fn lookup_env(&self, x: impl AsRef<str>) -> LambdaExpression {
         self.env.iter().find_map(|e| {
             if e.var == x.as_ref() {
                 Some(e.val.clone())
             } else {
                 None
             }
-        })
+        }).unwrap_or_else(|| LambdaExpression::Var(x.as_ref().to_string()))
     }
 
     pub fn is_done(&self) -> bool {
@@ -212,11 +230,8 @@ impl SECDMachine {
             // and 𝐶 is replaced by 𝑡𝐶.
             // We describe this step as follows: "Scanning 𝑋 causes 𝑙𝑜𝑐𝑎𝑡𝑖𝑜𝑛𝐸𝑋𝐸 to beloaded."
             Cont::Exp(LambdaExpression::Var(x)) => {
-                if let Some(val) = self.lookup_env(&x) {
-                    self.stack.push(StackValue::Val(val.clone()));
-                } else {
-                    anyhow::bail!("Variable not found: {}", x);
-                }
+                let val = self.lookup_env(&x);
+                self.stack.push(StackValue::Val(val.clone()));
             }
             // (2b) If ℎ𝐶 is a λ-expression 𝑋, scanning it causes the closure derived from 𝐸 and 𝑋
             // (as indicated above) to be loaded on to the stack.
