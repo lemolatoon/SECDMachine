@@ -294,19 +294,33 @@ impl SECDMachine {
 
     pub fn beta_transform(exp: LambdaExpression) -> anyhow::Result<LambdaExpression> {
         let mut secd = SECDMachine::new(exp);
-        fn print_pretty(machine: &SECDMachine) {
-            println!("Stack  : {}", format_vec(machine.stack()));
-            println!("Env    : {}", format_vec(machine.env()));
-            println!("Control: {}", format_vec(machine.control()));
-            println!("Dump   : {}", machine.dump());
-        }
-        print_pretty(&secd);
         while !secd.is_done() {
-            println!("------------------------------------");
-            print_pretty(&secd);
             secd = secd.next()?;
         }
-        println!("------------------------------------");
+
+        secd.get_result()
+    }
+
+    pub fn beta_transform_with_log<W: std::fmt::Write>(
+        exp: LambdaExpression,
+        mut f: W,
+    ) -> anyhow::Result<LambdaExpression> {
+        let mut secd = SECDMachine::new(exp);
+        fn print_pretty<W: std::fmt::Write>(machine: &SECDMachine, f: &mut W) -> std::fmt::Result {
+            writeln!(f, "Stack  : {}", format_vec(machine.stack()))?;
+            writeln!(f, "Env    : {}", format_vec(machine.env()))?;
+            writeln!(f, "Control: {}", format_vec(machine.control()))?;
+            writeln!(f, "Dump   : {}", machine.dump())?;
+
+            Ok(())
+        }
+        print_pretty(&secd, &mut f)?;
+        while !secd.is_done() {
+            writeln!(f, "------------------------------------")?;
+            print_pretty(&secd, &mut f)?;
+            secd = secd.next()?;
+        }
+        writeln!(f, "------------------------------------")?;
 
         secd.get_result()
     }
