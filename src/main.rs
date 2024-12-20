@@ -74,9 +74,19 @@ pub fn run_test() {
     println!("{}", run(lambda));
     println!("++++++++++++++++++++++++++++++++++++");
 
-    let lambda: LambdaExpression = "((\\x. (x y)) (\\x. (x x)))"
-        .parse()
-        .unwrap();
+    let lambda: LambdaExpression = "((\\x. (x y)) (\\x. (x x)))".parse().unwrap();
+    println!("++++++++++++++++++++++++++++++++++++");
+    println!("{}", &lambda);
+    println!("{}", run(lambda));
+    println!("++++++++++++++++++++++++++++++++++++");
+
+    let lambda: LambdaExpression = "((\\x.\\y.(x y))((\\x.\\y.(x y))(\\x.y)))".parse().unwrap();
+    println!("++++++++++++++++++++++++++++++++++++");
+    println!("{}", &lambda);
+    println!("{}", run(lambda));
+    println!("++++++++++++++++++++++++++++++++++++");
+
+    let lambda: LambdaExpression = "\\x. (x y) a".parse().unwrap();
     println!("++++++++++++++++++++++++++++++++++++");
     println!("{}", &lambda);
     println!("{}", run(lambda));

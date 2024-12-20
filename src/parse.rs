@@ -105,7 +105,7 @@ impl<I: Iterator<Item = Token>> Parser<I> {
                 }
                 Ok(expr)
             }
-            _ => Err(anyhow::anyhow!("Unexpected token")),
+            t => Err(anyhow::anyhow!("Unexpected token: {:?}", t)),
         }
     }
 }
