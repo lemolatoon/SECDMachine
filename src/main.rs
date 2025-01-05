@@ -1,6 +1,5 @@
-use std::io::{self, Write as _};
-
 use secd_machine::LambdaExpression;
+use std::io::{self, Write as _};
 
 fn format_vec<T: std::fmt::Display>(vec: &[T]) -> String {
     let contents = vec
