@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::Display,
     ops::{Deref, DerefMut},
     rc::{Rc, Weak},
@@ -64,74 +64,6 @@ impl LambdaExpression {
                 f.alpha_rename(old, new);
                 x.alpha_rename(old, new);
             }
-        }
-    }
-
-    /// Substitute `val` for `x` in `self`
-    /// Returns a map of variable names that were renamed to avoid capture
-    pub fn substitute(
-        &mut self,
-        x: String,
-        val: LambdaExpression,
-    ) -> anyhow::Result<HashMap<String, String>> {
-        println!("substitute: {} with {} in {}", x, val, self);
-        let mut renamed = HashMap::new();
-        self.substitute_inner(x, val, &mut renamed)?;
-        // normalize rename map
-        let mut renamed_normalized = HashMap::new();
-        for key in renamed.keys() {
-            let mut val = renamed.get(key).unwrap().clone();
-            while renamed.contains_key(&val) {
-                val = renamed.get(&val).unwrap().clone();
-            }
-            renamed_normalized.insert(key, val);
-        }
-        Ok(renamed)
-    }
-    pub fn substitute_inner(
-        &mut self,
-        x: String,
-        val: LambdaExpression,
-        rename_map: &mut HashMap<String, String>,
-    ) -> anyhow::Result<()> {
-        match self {
-            LambdaExpression::Var(v) if *v == x => {
-                *self = val;
-            }
-            LambdaExpression::Var(v) => {}
-            LambdaExpression::Lambda(x2, e) => {
-                if *x2 == x {
-                    // shadowed; don't substitute
-                    return Ok(());
-                }
-                // If x2 appears free in val, rename x2 to avoid capture
-                if !val.is_fresh_name(x2) {
-                    let mut fresh_x2 = x2.clone();
-                    while !val.is_fresh_name(&fresh_x2) || fresh_x2 == x {
-                        fresh_x2.push('\'');
-                    }
-                    println!("Renaming {} to {} to avoid capture", x2, fresh_x2);
-                    rename_map.insert(x2.clone(), fresh_x2.clone());
-                    e.alpha_rename(x2, &fresh_x2);
-                    *x2 = fresh_x2;
-                }
-                // Now substitute inside body
-                e.substitute(x, val)?;
-            }
-            LambdaExpression::Apply(fun, arg) => {
-                fun.substitute(x.clone(), val.clone())?;
-                arg.substitute(x, val)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn is_fresh_name(&self, x: &str) -> bool {
-        match self {
-            LambdaExpression::Var(v) => v != x,
-            LambdaExpression::Lambda(x2, e) => x2 != x && e.is_fresh_name(x),
-            LambdaExpression::Apply(fun, arg) => fun.is_fresh_name(x) && arg.is_fresh_name(x),
         }
     }
 
@@ -276,6 +208,10 @@ impl AnalyzedVar {
         &self.name
     }
 
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
     pub fn bounded_by(&self) -> anyhow::Result<Option<Rc<RefCell<AnalyzedLambdaExpression>>>> {
         self.bounded_by
             .as_ref()
@@ -326,12 +262,26 @@ impl AnalyzedLambda {
         &self.param_name
     }
 
+    fn set_param_name(&mut self, param_name: String) {
+        self.param_name = param_name;
+    }
+
     pub fn body(&self) -> &Rc<RefCell<AnalyzedLambdaExpression>> {
         &self.body
     }
 
     pub fn bounds(&self) -> &[Rc<RefCell<AnalyzedLambdaExpression>>] {
         &self.bounds
+    }
+
+    /// alpha_rename_param replaces all occurrences of `old` with `new` in this lambda's body,
+    /// and sets this lambda's param name to `new`.
+    pub fn alpha_rename_param(&mut self, old: &str, new: &str) {
+        if self.param_name == old {
+            self.param_name = new.to_string();
+        }
+        // Now rename in the body
+        self.body.borrow_mut().alpha_rename_var(old, new);
     }
 }
 
@@ -389,6 +339,319 @@ impl Display for AnalyzedLambdaExpression {
             AnalyzedLambdaExpression::Lambda(l) => write!(f, "{}", l),
             AnalyzedLambdaExpression::Apply(a) => write!(f, "{}", a),
         }
+    }
+}
+
+impl From<AnalyzedLambdaExpression> for LambdaExpression {
+    fn from(analyzed: AnalyzedLambdaExpression) -> Self {
+        match analyzed {
+            AnalyzedLambdaExpression::Var(v) => LambdaExpression::Var(v.name),
+            AnalyzedLambdaExpression::Lambda(l) => LambdaExpression::Lambda(
+                l.param_name,
+                Box::new(LambdaExpression::from(l.body.borrow().clone())),
+            ),
+            AnalyzedLambdaExpression::Apply(a) => LambdaExpression::Apply(
+                Box::new(LambdaExpression::from(a.fun.borrow().clone())),
+                Box::new(LambdaExpression::from(a.arg.borrow().clone())),
+            ),
+        }
+    }
+}
+
+impl AnalyzedLambdaExpression {
+    pub fn alpha_substitute(&mut self, x: &str, val: &Rc<RefCell<AnalyzedLambdaExpression>>) {
+        let mut new_name = None;
+        if let AnalyzedLambdaExpression::Lambda(l) = &*self {
+            let old_name = l.param_name();
+            new_name = Some(self.make_fresh_name(old_name, &val.borrow()));
+        }
+        match self {
+            AnalyzedLambdaExpression::Var(v) => {
+                // If this var is free and matches x, replace with val (cloning if needed)
+                if !v.is_bounded() && v.name() == x {
+                    *self = val.borrow().clone();
+                }
+            }
+            AnalyzedLambdaExpression::Lambda(l) => {
+                // If the parameter name is exactly x, do not substitute inside the lambda
+                if l.param_name() == x {
+                    return;
+                }
+
+                // if 'param_name' appears as a free var in val,
+                // rename it in the lambda to avoid capture.
+                if !val.borrow().is_fresh_name(l.param_name()) {
+                    let old_name = l.param_name().to_string();
+                    // Generate a new name that does not appear free in self or in val
+                    let new_name = new_name.unwrap();
+
+                    // Perform the rename on this lambda’s body
+                    // e.g. alpha_rename_param mutates l’s param name and body references
+                    l.alpha_rename_param(&old_name, &new_name);
+                }
+
+                // Continue substituting inside the body
+                l.body().borrow_mut().alpha_substitute(x, val);
+            }
+            AnalyzedLambdaExpression::Apply(a) => {
+                a.fun().borrow_mut().alpha_substitute(x, val);
+                a.arg().borrow_mut().alpha_substitute(x, val);
+            }
+        }
+    }
+
+    /// Returns true if `candidate` does NOT appear as a free variable in self.
+    pub fn is_fresh_name(&self, candidate: &str) -> bool {
+        match self {
+            AnalyzedLambdaExpression::Var(v) => {
+                // If it's free, check name
+                if !v.is_bounded() {
+                    v.name() != candidate
+                } else {
+                    // It's a bound var => no capture conflict as a free var
+                    true
+                }
+            }
+            AnalyzedLambdaExpression::Lambda(l) => {
+                // If the lambda's parameter is the same as candidate, we skip checking inside
+                // because candidate is bound within this scope. Otherwise, recurse
+                if l.param_name() == candidate {
+                    true
+                } else {
+                    l.body().borrow().is_fresh_name(candidate)
+                }
+            }
+            AnalyzedLambdaExpression::Apply(a) => {
+                a.fun().borrow().is_fresh_name(candidate)
+                    && a.arg().borrow().is_fresh_name(candidate)
+            }
+        }
+    }
+
+    /// Creates a new parameter name not free in either `self` or `other`.
+    /// For example, we can keep appending apostrophes (') or an incrementing index.
+    fn make_fresh_name(&self, base: &str, other: &AnalyzedLambdaExpression) -> String {
+        let mut candidate = base.to_string() + "'";
+        // Keep adjusting candidate if it appears free in either expression
+        while !self.is_fresh_name(&candidate) || !other.is_fresh_name(&candidate) {
+            candidate.push('\'');
+        }
+        candidate
+    }
+
+    /// A helper that renames only those Var(...) occurrences that match `old` and are bound by this lambda.
+    /// Recursively rename every matching bound var from `old` to `new`.
+    pub fn alpha_rename_var(&mut self, old: &str, new: &str) {
+        match self {
+            AnalyzedLambdaExpression::Var(v) => {
+                // If it's bounded AND the name matches old => rename
+                if v.is_bounded() && v.name() == old {
+                    v.set_name(new.to_string());
+                }
+            }
+            AnalyzedLambdaExpression::Lambda(l) => {
+                // If the lambda param matches `old`, rename it here
+                // (Though we typically do param renaming via alpha_rename_param above)
+                if l.param_name() == old {
+                    l.set_param_name(new.to_string());
+                } else {
+                    // Otherwise, rename inside
+                    l.body().borrow_mut().alpha_rename_var(old, new);
+                }
+            }
+            AnalyzedLambdaExpression::Apply(a) => {
+                a.fun().borrow_mut().alpha_rename_var(old, new);
+                a.arg().borrow_mut().alpha_rename_var(old, new);
+            }
+        }
+    }
+
+    /// Checks if two analyzed lambda expressions are alpha-equivalent.
+    /// This relies on the pointer structure for bounded variables (if they reference the
+    /// same lambda) and ignores parameter names for lambdas.
+    pub fn alpha_equiv(
+        a: &Rc<RefCell<AnalyzedLambdaExpression>>,
+        b: &Rc<RefCell<AnalyzedLambdaExpression>>,
+    ) -> bool {
+        let mut visited = HashSet::new();
+        alpha_equiv_inner(a, b, &mut visited)
+    }
+}
+
+/// Internal helper that tracks visited pairs of pointers to avoid infinite recursion.
+fn alpha_equiv_inner(
+    a: &Rc<RefCell<AnalyzedLambdaExpression>>,
+    b: &Rc<RefCell<AnalyzedLambdaExpression>>,
+    visited: &mut HashSet<(usize, usize)>,
+) -> bool {
+    let pa = Rc::as_ptr(a) as usize;
+    let pb = Rc::as_ptr(b) as usize;
+    // Same pointer => trivially alpha-equivalent
+    if pa == pb {
+        return true;
+    }
+    // If we've already seen this pair, assume no mismatch was found before
+    if !visited.insert((pa, pb)) {
+        return true;
+    }
+
+    let a_borrow = a.borrow();
+    let b_borrow = b.borrow();
+    match (a_borrow.deref(), b_borrow.deref()) {
+        (AnalyzedLambdaExpression::Var(v1), AnalyzedLambdaExpression::Var(v2)) => {
+            match (v1.is_bounded(), v2.is_bounded()) {
+                (false, false) => v1.name() == v2.name(), // both free => compare names
+                (true, true) => {
+                    // both bounded => check if they reference alpha-equivalent lambdas
+                    let (rc_a, rc_b) = (
+                        v1.bounded_by().unwrap().expect("should not be freed"),
+                        v2.bounded_by().unwrap().expect("should not be freed"),
+                    );
+                    alpha_equiv_inner(&rc_a, &rc_b, visited)
+                }
+                _ => false,
+            }
+        }
+        (AnalyzedLambdaExpression::Lambda(l1), AnalyzedLambdaExpression::Lambda(l2)) => {
+            // Ignore the param_name; just compare bodies
+            alpha_equiv_inner(l1.body(), l2.body(), visited)
+        }
+        (AnalyzedLambdaExpression::Apply(a1), AnalyzedLambdaExpression::Apply(a2)) => {
+            // Compare fun and arg
+            alpha_equiv_inner(a1.fun(), a2.fun(), visited)
+                && alpha_equiv_inner(a1.arg(), a2.arg(), visited)
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod alpha_equiv_tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use super::AnalyzedLambdaExpression;
+    fn alpha_equiv(
+        a: &Rc<RefCell<AnalyzedLambdaExpression>>,
+        b: &Rc<RefCell<AnalyzedLambdaExpression>>,
+    ) -> bool {
+        AnalyzedLambdaExpression::alpha_equiv(a, b)
+    }
+    use super::LambdaExpression;
+
+    // 1) Free variables (same name) => alpha-equivalent
+    #[test]
+    fn test_alpha_var_free_same_name() {
+        let e1 = "x".parse::<LambdaExpression>().unwrap().into_analyzed();
+        let e2 = "x".parse::<LambdaExpression>().unwrap().into_analyzed();
+        assert!(alpha_equiv(&e1, &e2));
+    }
+
+    // 2) Free variables (different name) => not alpha-equivalent
+    #[test]
+    fn test_alpha_var_free_different_name() {
+        let e1 = "x".parse::<LambdaExpression>().unwrap().into_analyzed();
+        let e2 = "y".parse::<LambdaExpression>().unwrap().into_analyzed();
+        assert!(!alpha_equiv(&e1, &e2));
+    }
+
+    // 3) Simple lambdas with different parameter names => alpha-equivalent
+    #[test]
+    fn test_alpha_lambda_simple() {
+        let e1 = "λx.x".parse::<LambdaExpression>().unwrap().into_analyzed();
+        let e2 = "λy.y".parse::<LambdaExpression>().unwrap().into_analyzed();
+        assert!(alpha_equiv(&e1, &e2));
+    }
+
+    // 4) Nested lambdas with different parameter names => alpha-equivalent
+    //    λx.λy.y vs λp.λq.q
+    #[test]
+    fn test_alpha_lambda_nested() {
+        let e1 = "λx.λy.y"
+            .parse::<LambdaExpression>()
+            .unwrap()
+            .into_analyzed();
+        let e2 = "λp.λq.q"
+            .parse::<LambdaExpression>()
+            .unwrap()
+            .into_analyzed();
+        assert!(alpha_equiv(&e1, &e2));
+    }
+
+    // 5) Simple application of free variables => alpha-equivalent if same names
+    //    (x y) vs (x y)
+    #[test]
+    fn test_alpha_apply_free_vars() {
+        let e1 = "(x y)".parse::<LambdaExpression>().unwrap().into_analyzed();
+        let e2 = "(x y)".parse::<LambdaExpression>().unwrap().into_analyzed();
+        assert!(alpha_equiv(&e1, &e2));
+    }
+
+    // 6) Applying two identical lambdas => alpha-equivalent
+    //    ((λx.x) (λy.y)) vs ((λu.u) (λv.v))
+    #[test]
+    fn test_alpha_apply_identical_lambdas() {
+        let e1 = "((λx.x) (λy.y))"
+            .parse::<LambdaExpression>()
+            .unwrap()
+            .into_analyzed();
+        let e2 = "((λu.u) (λv.v))"
+            .parse::<LambdaExpression>()
+            .unwrap()
+            .into_analyzed();
+        assert!(alpha_equiv(&e1, &e2));
+    }
+
+    // 7) Shadowed variable inside: λx.(λx.x)
+    //    vs λp.(λq.q). Should be alpha-equivalent
+    #[test]
+    fn test_alpha_shadowing() {
+        let e1 = "λx.(λx.x)"
+            .parse::<LambdaExpression>()
+            .unwrap()
+            .into_analyzed();
+        let e2 = "λp.(λq.q)"
+            .parse::<LambdaExpression>()
+            .unwrap()
+            .into_analyzed();
+        assert!(alpha_equiv(&e1, &e2));
+    }
+
+    // 8) Free variable vs. a lambda — not alpha-equivalent
+    //    x vs λy.y
+    #[test]
+    fn test_alpha_free_vs_lambda() {
+        let e1 = "x".parse::<LambdaExpression>().unwrap().into_analyzed();
+        let e2 = "λy.y".parse::<LambdaExpression>().unwrap().into_analyzed();
+        assert!(!alpha_equiv(&e1, &e2));
+    }
+
+    // 9) λx.(y x) vs λu.(y u) => alpha-equivalent if 'y' is free
+    #[test]
+    fn test_alpha_mixed_free_bound() {
+        let e1 = "λx.(y x)"
+            .parse::<LambdaExpression>()
+            .unwrap()
+            .into_analyzed();
+        let e2 = "λu.(y u)"
+            .parse::<LambdaExpression>()
+            .unwrap()
+            .into_analyzed();
+        assert!(alpha_equiv(&e1, &e2));
+    }
+
+    // 10) λx.(x y) vs λx.(y x) => not alpha-equivalent (the free var 'y' is in different positions)
+    #[test]
+    fn test_alpha_different_structure() {
+        let e1 = "λx.(x y)"
+            .parse::<LambdaExpression>()
+            .unwrap()
+            .into_analyzed();
+        let e2 = "λx.(y x)"
+            .parse::<LambdaExpression>()
+            .unwrap()
+            .into_analyzed();
+        assert!(!alpha_equiv(&e1, &e2));
     }
 }
 

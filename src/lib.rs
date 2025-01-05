@@ -210,6 +210,7 @@ mod tests {
             LambdaExpression::lambda("y'", LambdaExpression::var("y"))
         );
 
+        // shadowing, no need to rename
         let exp = "((\\x.\\y.x y) (\\y.y))"
             .parse::<LambdaExpression>()
             .unwrap();
@@ -217,16 +218,23 @@ mod tests {
         let var = |x| LambdaExpression::var(x);
         assert_eq!(
             result,
-            LambdaExpression::lambda(
-                "y'",
-                LambdaExpression::lambda("y", var("y")).apply(var("y'"))
-            )
+            LambdaExpression::lambda("y", LambdaExpression::lambda("y", var("y")).apply(var("y")))
+        );
+
+        let exp = "((\\x.\\y.x y) (y))".parse::<LambdaExpression>().unwrap();
+        let result = SECDMachine::beta_transform(exp).unwrap();
+        let var = |x| LambdaExpression::var(x);
+        assert_eq!(
+            result,
+            LambdaExpression::lambda("y'", var("y").apply(var("y'")))
         );
 
         let succ = "λn.λf.λx.(n f) (f n)".parse::<LambdaExpression>().unwrap();
         let zero = "λf.λx.x".parse::<LambdaExpression>().unwrap();
         let one = succ.clone().apply(zero.clone());
-        let one_reduced = SECDMachine::beta_transform(one.clone()).unwrap();
+        let mut log = String::new();
+        let one_reduced = SECDMachine::beta_transform_with_log(one.clone(), &mut log).unwrap();
+        println!("{}", log);
 
         assert_eq!(
             one_reduced,

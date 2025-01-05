@@ -77,27 +77,25 @@ impl Display for Closure {
 impl TryFrom<Closure> for LambdaExpression {
     type Error = anyhow::Error;
     fn try_from(c: Closure) -> Result<Self, Self::Error> {
-        let mut initial = LambdaExpression::Lambda(c.bv, Box::new(c.body));
-        let mut renamed = HashMap::<String, String>::new();
+        let initial = LambdaExpression::Lambda(c.bv, Box::new(c.body)).into_analyzed();
+        println!("Start! Initial: {}", initial.borrow());
         // Consider env as a list of assignments
         for e in c.env.into_iter().rev() {
-            let val = e.val.try_into()?;
-            let var = renamed.get(&e.var).unwrap_or(&e.var);
-            let renamed_thistime = initial.substitute(var.clone(), val)?;
-
-            // Update the rename map with the new renames
-            let mut renamed_new = HashMap::new();
-            for (k, v) in renamed {
-                let mut v = v;
-                while renamed_thistime.contains_key(&v) {
-                    v = renamed_thistime.get(&v).unwrap().clone();
-                }
-                renamed_new.insert(k, v);
-            }
-            renamed = renamed_new;
+            let x = e.var;
+            let v: LambdaExpression = e.val.try_into()?;
+            let analyzed_v = v.into_analyzed();
+            println!(
+                "Substituting {} with {} in {}",
+                x,
+                analyzed_v.borrow(),
+                initial.borrow()
+            );
+            initial.borrow_mut().alpha_substitute(&x, &analyzed_v);
+            println!("Result: {}", initial.borrow());
         }
 
-        Ok(initial)
+        let initial = initial.borrow();
+        Ok(initial.clone().into())
     }
 }
 
