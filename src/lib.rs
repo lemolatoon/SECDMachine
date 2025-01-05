@@ -1,6 +1,6 @@
 mod parse;
 
-use std::{fmt::Display, str::FromStr};
+use std::{collections::HashMap, fmt::Display, str::FromStr};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LambdaExpression {
@@ -22,22 +22,90 @@ impl LambdaExpression {
         parse::parse(input)
     }
 
-    pub fn substitute(&mut self, x: String, val: EnvValue) -> anyhow::Result<()> {
+    /// return `self` `arg`
+    pub fn apply(self, arg: LambdaExpression) -> LambdaExpression {
+        LambdaExpression::Apply(Box::new(self), Box::new(arg))
+    }
+
+    /// return \`x`. `e`
+    pub fn lambda(x: impl Into<String>, e: LambdaExpression) -> LambdaExpression {
+        LambdaExpression::Lambda(x.into(), Box::new(e))
+    }
+
+    /// return `x`
+    pub fn var(x: impl Into<String>) -> LambdaExpression {
+        LambdaExpression::Var(x.into())
+    }
+
+    pub fn alpha_rename(&mut self, old: &str, new: &str) {
         match self {
-            LambdaExpression::Var(v) => {
-                if *v == x {
-                    *self = val.try_into()?;
+            LambdaExpression::Var(v) if v == old => *self = LambdaExpression::Var(new.to_string()),
+            LambdaExpression::Var(_) => {}
+            LambdaExpression::Lambda(param, body) => {
+                if param == old {
+                    // Bound variable matches old; don't rename inside
+                    *self = LambdaExpression::Lambda(param.clone(), body.clone())
+                } else {
+                    // Rename occurrences of old in the body
+                    body.alpha_rename(old, new);
                 }
             }
+            LambdaExpression::Apply(f, x) => {
+                f.alpha_rename(old, new);
+                x.alpha_rename(old, new);
+            }
+        }
+    }
+
+    /// Substitute `val` for `x` in `self`
+    /// Returns a map of variable names that were renamed to avoid capture
+    pub fn substitute(
+        &mut self,
+        x: String,
+        val: LambdaExpression,
+    ) -> anyhow::Result<HashMap<String, String>> {
+        println!("substitute: {} with {} in {}", x, val, self);
+        let mut renamed = HashMap::new();
+        self.substitute_inner(x, val, &mut renamed)?;
+        // normalize rename map
+        let mut renamed_normalized = HashMap::new();
+        for key in renamed.keys() {
+            let mut val = renamed.get(key).unwrap().clone();
+            while renamed.contains_key(&val) {
+                val = renamed.get(&val).unwrap().clone();
+            }
+            renamed_normalized.insert(key, val);
+        }
+        Ok(renamed)
+    }
+    pub fn substitute_inner(
+        &mut self,
+        x: String,
+        val: LambdaExpression,
+        rename_map: &mut HashMap<String, String>,
+    ) -> anyhow::Result<()> {
+        match self {
+            LambdaExpression::Var(v) if *v == x => {
+                *self = val;
+            }
+            LambdaExpression::Var(v) => {}
             LambdaExpression::Lambda(x2, e) => {
                 if *x2 == x {
-                    anyhow::bail!(
-                        "Cannot substitute: {} is tried to substitute with {}: {}",
-                        LambdaExpression::Lambda(x2.clone(), e.clone()),
-                        x,
-                        val
-                    );
+                    // shadowed; don't substitute
+                    return Ok(());
                 }
+                // If x2 appears free in val, rename x2 to avoid capture
+                if !val.is_fresh_name(x2) {
+                    let mut fresh_x2 = x2.clone();
+                    while !val.is_fresh_name(&fresh_x2) || fresh_x2 == x {
+                        fresh_x2.push('\'');
+                    }
+                    println!("Renaming {} to {} to avoid capture", x2, fresh_x2);
+                    rename_map.insert(x2.clone(), fresh_x2.clone());
+                    e.alpha_rename(x2, &fresh_x2);
+                    *x2 = fresh_x2;
+                }
+                // Now substitute inside body
                 e.substitute(x, val)?;
             }
             LambdaExpression::Apply(fun, arg) => {
@@ -47,6 +115,14 @@ impl LambdaExpression {
         }
 
         Ok(())
+    }
+
+    pub fn is_fresh_name(&self, x: &str) -> bool {
+        match self {
+            LambdaExpression::Var(v) => v != x,
+            LambdaExpression::Lambda(x2, e) => x2 != x && e.is_fresh_name(x),
+            LambdaExpression::Apply(fun, arg) => fun.is_fresh_name(x) && arg.is_fresh_name(x),
+        }
     }
 }
 
@@ -136,9 +212,23 @@ impl TryFrom<Closure> for LambdaExpression {
     type Error = anyhow::Error;
     fn try_from(c: Closure) -> Result<Self, Self::Error> {
         let mut initial = LambdaExpression::Lambda(c.bv, Box::new(c.body));
+        let mut renamed = HashMap::<String, String>::new();
         // Consider env as a list of assignments
         for e in c.env.into_iter().rev() {
-            initial.substitute(e.var, e.val)?;
+            let val = e.val.try_into()?;
+            let var = renamed.get(&e.var).unwrap_or(&e.var);
+            let renamed_thistime = initial.substitute(var.clone(), val)?;
+
+            // Update the rename map with the new renames
+            let mut renamed_new = HashMap::new();
+            for (k, v) in renamed {
+                let mut v = v;
+                while renamed_thistime.contains_key(&v) {
+                    v = renamed_thistime.get(&v).unwrap().clone();
+                }
+                renamed_new.insert(k, v);
+            }
+            renamed = renamed_new;
         }
 
         Ok(initial)
@@ -625,5 +715,182 @@ mod tests {
             let result = SECDMachine::beta_transform(lambda).unwrap();
             assert_eq!(result, "λz.z".parse::<LambdaExpression>().unwrap());
         }
+    }
+
+    #[test]
+    fn test_renamereduction() {
+        let exp = "(\\x.\\y.x) y".parse::<LambdaExpression>().unwrap();
+        let result = SECDMachine::beta_transform(exp).unwrap();
+        assert_eq!(result, "\\y'.y".parse::<LambdaExpression>().unwrap());
+        assert_eq!(
+            result,
+            LambdaExpression::lambda("y'", LambdaExpression::var("y"))
+        );
+
+        let exp = "((\\x.\\y.x y) (\\y.y))"
+            .parse::<LambdaExpression>()
+            .unwrap();
+        let result = SECDMachine::beta_transform(exp).unwrap();
+        let var = |x| LambdaExpression::var(x);
+        assert_eq!(
+            result,
+            LambdaExpression::lambda(
+                "y'",
+                LambdaExpression::lambda("y", var("y")).apply(var("y'"))
+            )
+        );
+
+        let succ = "λn.λf.λx.f ((n f) x)".parse::<LambdaExpression>().unwrap();
+        let zero = "λf.λx.x".parse::<LambdaExpression>().unwrap();
+        let one = succ.clone().apply(zero.clone());
+        let one_reduced = SECDMachine::beta_transform(one.clone()).unwrap();
+
+        assert_eq!(
+            one_reduced,
+            "λf.λx.f x".parse::<LambdaExpression>().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_pred() {
+        let succ = "λn.λf.λx.f ((n f) x)".parse::<LambdaExpression>().unwrap();
+        assert_eq!(
+            succ,
+            LambdaExpression::Lambda(
+                "n".to_string(),
+                Box::new(LambdaExpression::Lambda(
+                    "f".to_string(),
+                    Box::new(LambdaExpression::Lambda(
+                        "x".to_string(),
+                        Box::new(LambdaExpression::Apply(
+                            Box::new(LambdaExpression::Var("f".to_string())),
+                            Box::new(LambdaExpression::Apply(
+                                Box::new(LambdaExpression::Apply(
+                                    Box::new(LambdaExpression::Var("n".to_string())),
+                                    Box::new(LambdaExpression::Var("f".to_string()))
+                                )),
+                                Box::new(LambdaExpression::Var("x".to_string()))
+                            ))
+                        ))
+                    ))
+                ))
+            )
+        );
+
+        let pair = "λx.λy.λf.f x y".parse::<LambdaExpression>().unwrap();
+        assert_eq!(
+            pair,
+            LambdaExpression::Lambda(
+                "x".to_string(),
+                Box::new(LambdaExpression::Lambda(
+                    "y".to_string(),
+                    Box::new(LambdaExpression::Lambda(
+                        "f".to_string(),
+                        Box::new(LambdaExpression::Apply(
+                            Box::new(LambdaExpression::Apply(
+                                Box::new(LambdaExpression::Var("f".to_string())),
+                                Box::new(LambdaExpression::Var("x".to_string()))
+                            )),
+                            Box::new(LambdaExpression::Var("y".to_string()))
+                        ))
+                    ))
+                ))
+            )
+        );
+
+        let fst = "λp.p (λx.λy.x)".parse::<LambdaExpression>().unwrap();
+        assert_eq!(
+            fst,
+            LambdaExpression::Lambda(
+                "p".to_string(),
+                Box::new(LambdaExpression::Apply(
+                    Box::new(LambdaExpression::Var("p".to_string())),
+                    Box::new(LambdaExpression::Lambda(
+                        "x".to_string(),
+                        Box::new(LambdaExpression::Lambda(
+                            "y".to_string(),
+                            Box::new(LambdaExpression::Var("x".to_string()))
+                        ))
+                    ))
+                ))
+            )
+        );
+
+        let snd = "λp.p (λx.λy.y)".parse::<LambdaExpression>().unwrap();
+        assert_eq!(
+            snd,
+            LambdaExpression::Lambda(
+                "p".to_string(),
+                Box::new(LambdaExpression::Apply(
+                    Box::new(LambdaExpression::Var("p".to_string())),
+                    Box::new(LambdaExpression::Lambda(
+                        "x".to_string(),
+                        Box::new(LambdaExpression::Lambda(
+                            "y".to_string(),
+                            Box::new(LambdaExpression::Var("y".to_string()))
+                        ))
+                    ))
+                ))
+            )
+        );
+
+        let p = LambdaExpression::var("p");
+        let shift = LambdaExpression::lambda(
+            "p",
+            pair.clone()
+                .apply(snd.clone().apply(p.clone()))
+                .apply(succ.clone().apply(snd.apply(p))),
+        );
+
+        let zero = "λf.λx.x".parse::<LambdaExpression>().unwrap();
+        let one = "λf.λx.f x".parse::<LambdaExpression>().unwrap();
+        let two = "λf.λx.f (f x)".parse::<LambdaExpression>().unwrap();
+        assert_eq!(
+            two,
+            LambdaExpression::Lambda(
+                "f".to_string(),
+                Box::new(LambdaExpression::Lambda(
+                    "x".to_string(),
+                    Box::new(LambdaExpression::Apply(
+                        Box::new(LambdaExpression::Var("f".to_string())),
+                        Box::new(LambdaExpression::Apply(
+                            Box::new(LambdaExpression::Var("f".to_string())),
+                            Box::new(LambdaExpression::Var("x".to_string()))
+                        ))
+                    ))
+                ))
+            )
+        );
+
+        // let result = SECDMachine::beta_transform(
+        //     shift
+        //         .clone()
+        //         .apply(pair.clone().apply(zero.clone()).apply(one.clone())),
+        // )
+        // .unwrap();
+
+        // assert_eq!(result, pair.clone().apply(one.clone()).apply(two.clone()));
+
+        let pred = LambdaExpression::lambda(
+            "n",
+            LambdaExpression::var("n")
+                .apply(shift.clone())
+                .apply(pair.clone().apply(zero.clone()).apply(zero.clone())),
+        );
+
+        let reduced_pred = SECDMachine::beta_transform(pred.clone().apply(two.clone())).unwrap();
+        println!("pred: {:?}", reduced_pred);
+        println!("pred: {}", reduced_pred);
+        println!("pred 2: {}", pred.clone().apply(two.clone()));
+        println!(
+            "pred 2: {}",
+            SECDMachine::beta_transform(pred.clone().apply(two.clone())).unwrap()
+        );
+
+        let id = pred
+            .clone()
+            .apply(succ.clone().apply(LambdaExpression::var("x")));
+        println!("id: {}", id);
+        println!("id 2: {}", SECDMachine::beta_transform(id.clone()).unwrap());
     }
 }

@@ -12,6 +12,7 @@ pub enum Token {
     Identifier(String),
 }
 
+#[derive(Debug, Clone)]
 pub struct Lexer<'a> {
     chars: Peekable<Chars<'a>>,
 }
@@ -41,10 +42,10 @@ impl<'a> Iterator for Lexer<'a> {
             '.' => Some(Token::Dot),
             '(' => Some(Token::LParen),
             ')' => Some(Token::RParen),
-            c if c.is_alphabetic() => {
+            c if c.is_alphabetic() || c == '\'' => {
                 let mut ident = c.to_string();
                 while let Some(&c) = self.chars.peek() {
-                    if c.is_alphanumeric() {
+                    if c.is_alphanumeric() || c == '\'' {
                         ident.push(c);
                         self.chars.next();
                     } else {
