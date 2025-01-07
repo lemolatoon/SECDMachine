@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fmt::Display,
     ops::{Deref, DerefMut},
     rc::{Rc, Weak},

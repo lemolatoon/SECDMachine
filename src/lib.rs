@@ -324,12 +324,12 @@ mod tests {
             SECDMachine::beta_reduction_with_body_simplification(suc_suc_zero.clone()).unwrap();
         println!("========== START SUCC SUCC ZERO ==========");
         println!("{}", log);
-        assert_eq!(
-            suc_suc_zero_reduced,
-            "λf.λx.f (f x)".parse::<LambdaExpression>().unwrap(),
+        let expected= "λf.λx.f (f x)".parse::<LambdaExpression>().unwrap();
+        assert!(
+            suc_suc_zero_reduced.alpha_equiv(&expected),
             "result: {}, expected: {}",
             suc_suc_zero_reduced,
-            "λf.λx.f (f x)".parse::<LambdaExpression>().unwrap()
+            expected,
         );
     }
 
@@ -538,50 +538,6 @@ mod tests {
             expected
         );
 
-        let pred_piece0 = LambdaExpression::var("n")
-            .apply(shift.clone())
-            .apply(pair.clone().apply(zero.clone()).apply(zero.clone()));
-        let (pred_piece0_reduced, log) =
-            SECDMachine::beta_reduction_with_body_simplification(pred_piece0.clone()).unwrap();
-        println!(
-            "PRED_PIECE0 (eq?{}): {} -> {}",
-            pred_piece0.alpha_equiv(&pred_piece0_reduced),
-            pred_piece0,
-            pred_piece0_reduced
-        );
-        let pred_piece0 = pred_piece0_reduced;
-        let pred_piece = fst.clone().apply(pred_piece0);
-        let (pred_piece_reduced, _log) =
-            SECDMachine::beta_reduction_with_body_simplification(pred_piece.clone()).unwrap();
-        println!(
-            "PRED_PIECE (eq?{}):\n {} ->\n {}",
-            pred_piece.alpha_equiv(&pred_piece_reduced),
-            pred_piece,
-            pred_piece_reduced
-        );
-        let pred_piece = pred_piece_reduced;
-        let (pred_piece_reduced, _log) =
-            SECDMachine::beta_reduction_with_body_simplification(pred_piece.clone()).unwrap();
-        println!(
-            "PRED_PIECE (eq?{}):\n {} ->\n {}",
-            pred_piece.alpha_equiv(&pred_piece_reduced),
-            pred_piece,
-            pred_piece_reduced
-        );
-        let pred_piece = pred_piece_reduced;
-        let pred = LambdaExpression::lambda("n", pred_piece);
-
-        let (pred_reduced, _log) =
-            SECDMachine::beta_reduction_with_body_simplification(pred.clone()).unwrap();
-        println!(
-            "pred (eq?{}):\n {} ->\n {}",
-            pred.alpha_equiv(&pred_reduced),
-            pred,
-            pred_reduced
-        );
-        let pred = pred_reduced;
-
-        println!("PRED REDUCTION START!!!!!!");
         let pred = LambdaExpression::lambda(
             "n",
             fst.clone().apply(
@@ -590,13 +546,6 @@ mod tests {
                     .apply(pair.clone().apply(zero.clone()).apply(zero.clone())),
             ),
         );
-        let (pred_reduced, log) =
-            SECDMachine::beta_reduction_with_body_simplification(pred.clone().apply(two.clone()))
-                .unwrap();
-        println!("PRED:\n {} ->\n {}", pred, pred_reduced);
-        println!("{}", log);
-        let pred = pred_reduced;
-        panic!();
 
         let pred_2 = pred.clone().apply(two.clone());
         let (pred_2, _log) = SECDMachine::beta_reduction_with_body_simplification(pred_2).unwrap();
@@ -703,7 +652,6 @@ mod tests {
         };
         let zero = || church_n(0);
         for i in 0..10 {
-            let n = church_n(i);
             let n_minus_n = apply_pred_n_times(i, church_n(i));
             let (n_minus_n_reduced, _log) =
                 SECDMachine::beta_reduction_with_body_simplification(n_minus_n).unwrap();
@@ -729,7 +677,6 @@ mod tests {
         println!("{}", log);
 
         assert_eq!(plus_2_3_reduced, five);
-        panic!();
         for i in 0..3 {
             for j in 0..3 {
                 let m = church_n(i);
@@ -762,37 +709,5 @@ mod tests {
 
         let expected: LambdaExpression = "\\n. (y (y y))".parse().unwrap();
         assert_eq!(result, expected);
-
-        let plus = || {
-            "λm. λn. λs.λz. m s (n s z)"
-                .parse::<LambdaExpression>()
-                .unwrap()
-        };
-        let succ = || "λn.λf.λx.(n f) (f x)".parse::<LambdaExpression>().unwrap();
-        let zero = || "λf.λx.x".parse::<LambdaExpression>().unwrap();
-        let var = |x| LambdaExpression::var(x);
-        let lambda = |v, b| LambdaExpression::lambda(v, b);
-
-        let plus_prime = lambda("m", lambda("n", var("m").apply(succ()).apply(var("n"))));
-
-        let plus_2_3 = plus()
-            .apply(succ().apply(succ().apply(zero())))
-            .apply(succ().apply(zero()));
-        let (plus_2_3_reduced, log) =
-            SECDMachine::beta_reduction_with_body_simplification(plus_2_3.clone()).unwrap();
-
-        let five = succ().apply(succ().apply(succ().apply(succ().apply(succ().apply(zero())))));
-
-        let (five_reduced, log) =
-            SECDMachine::beta_reduction_with_body_simplification(five.clone()).unwrap();
-
-        assert_eq!(five_reduced, plus_2_3_reduced);
-
-        let (plus_prime_reduced, log) =
-            SECDMachine::beta_reduction_with_body_simplification(plus_prime.clone()).unwrap();
-        println!("{}", log);
-        assert_eq!(plus_prime_reduced, plus());
-
-        panic!();
     }
 }

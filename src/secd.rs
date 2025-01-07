@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Display, io, process::Stdio, result};
+use std::fmt::Display;
 
 use crate::lambda::{AnalyzedLambdaExpression, LambdaExpression};
 
@@ -288,7 +288,6 @@ impl SECDMachine {
         exp: LambdaExpression,
     ) -> anyhow::Result<(LambdaExpression, String)> {
         use std::fmt::Write as _;
-        use std::io::Write as _;
         let exp_str = format!("{}", exp);
         let mut secd = SECDMachine::new(exp);
         let mut f = String::new();
