@@ -90,6 +90,21 @@ pub fn run_test() {
     println!("{}", &lambda);
     println!("{}", run(lambda));
     println!("++++++++++++++++++++++++++++++++++++");
+
+    let succ = "λn.λf.λx.(n f) (f x)".parse::<LambdaExpression>().unwrap();
+    let zero = "λf.λx.x".parse::<LambdaExpression>().unwrap();
+    let one = succ.clone().apply(zero.clone());
+    let (one_reduced, log) =
+        secd_machine::SECDMachine::beta_reduction_with_body_simplification(one.clone()).unwrap();
+    println!("{}", log);
+
+    println!("{} -> {}", one, one_reduced);
+    assert_eq!(
+        one_reduced,
+        "λf.λx.f x".parse::<LambdaExpression>().unwrap(),
+        "Expected one_reduced to be λf.λx.f x but got {}",
+        one_reduced
+    );
 }
 
 fn main() {

@@ -1,6 +1,6 @@
-use std::{collections::HashMap, fmt::Display};
+use std::{collections::HashMap, fmt::Display, io, process::Stdio, result};
 
-use crate::lambda::LambdaExpression;
+use crate::lambda::{AnalyzedLambdaExpression, LambdaExpression};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EnvValue {
@@ -78,20 +78,12 @@ impl TryFrom<Closure> for LambdaExpression {
     type Error = anyhow::Error;
     fn try_from(c: Closure) -> Result<Self, Self::Error> {
         let initial = LambdaExpression::Lambda(c.bv, Box::new(c.body)).into_analyzed();
-        println!("Start! Initial: {}", initial.borrow());
         // Consider env as a list of assignments
         for e in c.env.into_iter().rev() {
             let x = e.var;
             let v: LambdaExpression = e.val.try_into()?;
             let analyzed_v = v.into_analyzed();
-            println!(
-                "Substituting {} with {} in {}",
-                x,
-                analyzed_v.borrow(),
-                initial.borrow()
-            );
             initial.borrow_mut().alpha_substitute(&x, &analyzed_v);
-            println!("Result: {}", initial.borrow());
         }
 
         let initial = initial.borrow();
@@ -220,6 +212,7 @@ impl SECDMachine {
     pub fn lookup_env(&self, x: impl AsRef<str>) -> EnvValue {
         self.env
             .iter()
+            .rev()
             .find_map(|e| {
                 if e.var == x.as_ref() {
                     Some(e.val.clone())
@@ -253,6 +246,111 @@ impl SECDMachine {
         }
 
         secd.get_result()
+    }
+
+    fn apply_simplification_to_body(
+        var: String,
+        body: LambdaExpression,
+    ) -> anyhow::Result<(LambdaExpression, String)> {
+        use std::fmt::Write as _;
+        let mut f = String::new();
+        let before = format!("{}", body);
+        writeln!(f, "--- Simplifying body {} ---", before)?;
+        let (simplified, log) = Self::beta_reduction_with_body_simplification(body.clone())?;
+        writeln!(f, "{}", log)?;
+        writeln!(f, "Simplified: {} -> {}", before, simplified)?;
+        let lambda_simplified = LambdaExpression::Lambda(var, Box::new(simplified.clone()));
+        // check body alpha equivalence
+        if AnalyzedLambdaExpression::alpha_equiv(&body.into_analyzed(), &simplified.into_analyzed())
+        {
+            writeln!(f, "Body is alpha equivalent")?;
+            return Ok((lambda_simplified, f));
+        }
+
+        let lambda_simplified_str = format!("{}", lambda_simplified);
+        writeln!(
+            f,
+            "--- Simplifying simplified {} ---",
+            lambda_simplified_str
+        )?;
+        let (lambda_simplified_simplified, log) =
+            Self::beta_reduction_with_body_simplification(lambda_simplified)?;
+        writeln!(f, "{}", log)?;
+        writeln!(
+            f,
+            "Simplified(lambda): {} -> {}",
+            lambda_simplified_str, lambda_simplified_simplified
+        )?;
+        Ok((lambda_simplified_simplified, f))
+    }
+
+    pub fn beta_reduction_with_body_simplification(
+        exp: LambdaExpression,
+    ) -> anyhow::Result<(LambdaExpression, String)> {
+        use std::fmt::Write as _;
+        use std::io::Write as _;
+        let exp_str = format!("{}", exp);
+        let mut secd = SECDMachine::new(exp);
+        let mut f = String::new();
+        fn print_pretty<W: std::fmt::Write>(machine: &SECDMachine, f: &mut W) -> std::fmt::Result {
+            // return Ok(());
+            writeln!(f, "------------------------------------")?;
+            writeln!(f, "Stack  : {}", format_vec(machine.stack()))?;
+            writeln!(f, "Env    : {}", format_vec(machine.env()))?;
+            writeln!(f, "Control: {}", format_vec(machine.control()))?;
+            writeln!(f, "Dump   : {}", machine.dump())?;
+
+            Ok(())
+        }
+        print_pretty(&secd, &mut f)?;
+        while !secd.is_done() {
+            print_pretty(&secd, &mut f)?;
+            secd = secd.next()?;
+        }
+        print_pretty(&secd, &mut f)?;
+
+        let result = secd.get_result()?;
+        writeln!(f, "{} -> \n{}", exp_str, result)?;
+
+        writeln!(
+            f,
+            "body simplified result is_applicable?: {}",
+            matches!(result, LambdaExpression::Apply(_, _))
+        )?;
+        match result {
+            LambdaExpression::Lambda(var, body) => {
+                let (result, log) = Self::apply_simplification_to_body(var, *body)?;
+                writeln!(f, "{}", log)?;
+                Ok((result, f))
+            }
+            LambdaExpression::Apply(fun, body) => match (*fun, *body) {
+                (LambdaExpression::Lambda(var1, body1), LambdaExpression::Lambda(var2, body2)) => {
+                    let (result1, log1) = Self::apply_simplification_to_body(var1, *body1)?;
+                    writeln!(f, "{}", log1)?;
+                    let (result2, log2) = Self::apply_simplification_to_body(var2, *body2)?;
+                    writeln!(f, "{}", log2)?;
+                    Ok((
+                        LambdaExpression::Apply(Box::new(result1), Box::new(result2)),
+                        f,
+                    ))
+                }
+                (LambdaExpression::Lambda(var, body), apply_body) => {
+                    let (result, log) = Self::apply_simplification_to_body(var, *body)?;
+                    writeln!(f, "{}", log)?;
+                    Ok((
+                        LambdaExpression::Apply(Box::new(result), Box::new(apply_body)),
+                        f,
+                    ))
+                }
+                (fun, LambdaExpression::Lambda(var, body)) => {
+                    let (result, log) = Self::apply_simplification_to_body(var, *body)?;
+                    writeln!(f, "{}", log)?;
+                    Ok((LambdaExpression::Apply(Box::new(fun), Box::new(result)), f))
+                }
+                (fun, body) => Ok((LambdaExpression::Apply(Box::new(fun), Box::new(body)), f)),
+            },
+            _ => Ok((result, f)),
+        }
     }
 
     pub fn beta_transform_with_log<W: std::fmt::Write>(
@@ -364,9 +462,13 @@ impl SECDMachine {
                         let Some(second_s) = self.stack.pop() else {
                             anyhow::bail!("No more stack");
                         };
-                        let StackValue::Val(second_s) = second_s else {
-                            anyhow::bail!("Expected Val");
+                        let second_s = match second_s {
+                            StackValue::Clo(c) => c.try_into()?,
+                            StackValue::Val(e) => e,
                         };
+                        // let StackValue::Val(second_s) = second_s else {
+                        //     anyhow::bail!("Expected Val");
+                        // };
                         self.stack.push(StackValue::Val(LambdaExpression::Apply(
                             Box::new(first),
                             Box::new(second_s),

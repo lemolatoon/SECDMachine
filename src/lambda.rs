@@ -67,6 +67,13 @@ impl LambdaExpression {
         }
     }
 
+    pub fn alpha_equiv(&self, other: &LambdaExpression) -> bool {
+        AnalyzedLambdaExpression::alpha_equiv(
+            &self.clone().into_analyzed(),
+            &other.clone().into_analyzed(),
+        )
+    }
+
     pub fn into_analyzed(self) -> Rc<RefCell<AnalyzedLambdaExpression>> {
         fn convert(
             expr: &LambdaExpression,
@@ -279,9 +286,17 @@ impl AnalyzedLambda {
     pub fn alpha_rename_param(&mut self, old: &str, new: &str) {
         if self.param_name == old {
             self.param_name = new.to_string();
+            for bound in self.bounds.iter() {
+                let mut bound_mut = bound.borrow_mut();
+                let AnalyzedLambdaExpression::Var(ref mut v) = bound_mut.deref_mut() else {
+                    panic!("Expected a Var in bounds");
+                };
+                assert_eq!(v.name(), old);
+                v.set_name(new.to_string());
+            }
         }
         // Now rename in the body
-        self.body.borrow_mut().alpha_rename_var(old, new);
+        // self.body.borrow_mut().alpha_rename_var(old, new);
     }
 }
 
@@ -443,17 +458,22 @@ impl AnalyzedLambdaExpression {
     /// Recursively rename every matching bound var from `old` to `new`.
     pub fn alpha_rename_var(&mut self, old: &str, new: &str) {
         match self {
-            AnalyzedLambdaExpression::Var(v) => {
-                // If it's bounded AND the name matches old => rename
-                if v.is_bounded() && v.name() == old {
-                    v.set_name(new.to_string());
-                }
+            AnalyzedLambdaExpression::Var(_v) => {
+                return;
             }
             AnalyzedLambdaExpression::Lambda(l) => {
                 // If the lambda param matches `old`, rename it here
                 // (Though we typically do param renaming via alpha_rename_param above)
                 if l.param_name() == old {
                     l.set_param_name(new.to_string());
+                    for bound in l.bounds() {
+                        let mut bound_mut = bound.borrow_mut();
+                        let AnalyzedLambdaExpression::Var(ref mut v) = bound_mut.deref_mut() else {
+                            panic!("Expected a Var in bounds");
+                        };
+                        assert_eq!(v.name(), old);
+                        v.set_name(new.to_string());
+                    }
                 } else {
                     // Otherwise, rename inside
                     l.body().borrow_mut().alpha_rename_var(old, new);
